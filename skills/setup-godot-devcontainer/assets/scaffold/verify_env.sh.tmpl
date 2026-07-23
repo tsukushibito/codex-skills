@@ -33,7 +33,16 @@ if [[ "{{INSTALL_SSH}}" == true ]]; then
   require_command sshd
   sudo /usr/sbin/sshd -t
 fi
-if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then require_command code-cli; fi
+if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then
+  require_command code-cli
+  # A Dev Container terminal normally injects VSCODE_IPC_HOOK_CLI. The
+  # standalone code-cli wrapper must ignore it instead of delegating to the
+  # editor's Remote CLI.
+  vscode_cli_version="$(
+    VSCODE_IPC_HOOK_CLI=/tmp/code-cli-must-not-use-vscode-ipc.sock \
+      code-cli --version
+  )"
+fi
 
 python3 - "$lock_file" <<'PY'
 import json
@@ -87,4 +96,4 @@ printf 'Node: %s\n' "$(node --version)"
 printf 'Codex: %s\n' "$(codex --version)"
 printf 'uv: %s\n' "$(uv --version)"
 printf 'gdtoolkit: %s\n' "$(gdlint --version)"
-if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then printf 'VS Code CLI: %s\n' "$(code-cli --version | head -n 1)"; fi
+if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then printf 'VS Code CLI: %s\n' "$(printf '%s\n' "$vscode_cli_version" | head -n 1)"; fi

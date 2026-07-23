@@ -50,7 +50,11 @@ RUN set -eux; \
         printf '%s  %s\n' "$vscode_package_sha256" /tmp/vscode.deb | sha256sum --check --strict -; \
         apt-get install -y --no-install-recommends /tmp/vscode.deb; \
         rm -f /tmp/vscode.deb; \
-        printf '%s\n' '#!/usr/bin/env sh' 'exec /usr/share/code/bin/code --user-data-dir /home/vscode/.vscode-data/user --extensions-dir /home/vscode/.vscode-data/extensions "$@"' > /usr/local/bin/code-cli; \
+        printf '%s\n' \
+            '#!/usr/bin/env sh' \
+            '# Keep this CLI independent from the VS Code Remote CLI injected into Dev Containers.' \
+            'exec env -u VSCODE_IPC_HOOK_CLI /usr/share/code/bin/code --user-data-dir /home/vscode/.vscode-data/user --extensions-dir /home/vscode/.vscode-data/extensions "$@"' \
+            > /usr/local/bin/code-cli; \
         chmod 0755 /usr/local/bin/code-cli; \
         rm -f /usr/bin/code; \
     fi; \
