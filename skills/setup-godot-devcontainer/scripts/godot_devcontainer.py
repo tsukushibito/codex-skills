@@ -948,6 +948,16 @@ def static_validate(target: Path) -> list[str]:
                     errors.append(f"VS Code {architecture} URL does not match the toolchain lock")
                 if build_args.get(f"VSCODE_{architecture.upper()}_SHA256") != package.get("sha256"):
                     errors.append(f"VS Code {architecture} checksum does not match the toolchain lock")
+            dockerfile = (target / ".devcontainer/Dockerfile").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            verifier = (target / "scripts/dev/verify_env.sh").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            if "env -u VSCODE_IPC_HOOK_CLI /usr/share/code/bin/code" not in dockerfile:
+                errors.append("code-cli must ignore the VS Code Remote CLI IPC hook")
+            if "VSCODE_IPC_HOOK_CLI=/tmp/code-cli-must-not-use-vscode-ipc.sock" not in verifier:
+                errors.append("environment verification must test code-cli IPC isolation")
     try:
         codex = tomllib.loads((target / ".codex/config.toml").read_text(encoding="utf-8"))
         if codex.get("approval_policy") != "never":

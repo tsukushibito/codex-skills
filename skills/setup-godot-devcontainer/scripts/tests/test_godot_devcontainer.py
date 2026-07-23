@@ -131,7 +131,13 @@ class PlannerTests(unittest.TestCase):
             self.assertEqual([], config["runArgs"])
             self.assertEqual("https://example.invalid/code-amd64.deb", config["build"]["args"]["VSCODE_AMD64_URL"])
             self.assertEqual("a" * 64, config["build"]["args"]["VSCODE_AMD64_SHA256"])
-            self.assertIn("code-cli", operations["scripts/dev/verify_env.sh"]["content"])
+            dockerfile = operations[".devcontainer/Dockerfile"]["content"]
+            verifier = operations["scripts/dev/verify_env.sh"]["content"]
+            self.assertIn("env -u VSCODE_IPC_HOOK_CLI /usr/share/code/bin/code", dockerfile)
+            self.assertIn(
+                "VSCODE_IPC_HOOK_CLI=/tmp/code-cli-must-not-use-vscode-ipc.sock",
+                verifier,
+            )
             self.assertIn("rev-parse --is-inside-work-tree", operations[".devcontainer/post-create.sh"]["content"])
             self.assertEqual(
                 'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n',
@@ -273,7 +279,28 @@ class PlannerTests(unittest.TestCase):
             self.assertEqual(["-p", "127.0.0.1:2224:22"], config["runArgs"])
             verify = operations["scripts/dev/verify_env.sh"]["content"]
             self.assertIn('if [[ "false" == true ]]; then require_command gh; fi', verify)
-            self.assertIn('if [[ "false" == true ]]; then require_command code-cli; fi', verify)
+            self.assertIn('if [[ "false" == true ]]; then\n  require_command code-cli', verify)
+
+    def test_static_validation_rejects_vscode_cli_without_ipc_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock)
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            MODULE.apply_plan(plan_path)
+            dockerfile = root / ".devcontainer" / "Dockerfile"
+            dockerfile.write_text(
+                dockerfile.read_text(encoding="utf-8").replace(
+                    "env -u VSCODE_IPC_HOOK_CLI /usr/share/code/bin/code",
+                    "/usr/share/code/bin/code",
+                ),
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "code-cli must ignore the VS Code Remote CLI IPC hook",
+                MODULE.static_validate(root),
+            )
 
     def test_single_architecture_does_not_claim_other_architecture(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
