@@ -1,0 +1,65 @@
+ARG UV_IMAGE={{UV_IMAGE}}
+FROM ${UV_IMAGE} AS uv
+
+FROM mcr.microsoft.com/devcontainers/base:bookworm
+
+ARG TARGETARCH
+ARG GODOT_VERSION
+ARG GODOT_FLAVOR
+ARG GODOT_AMD64_URL
+ARG GODOT_AMD64_SHA256
+ARG GODOT_ARM64_URL
+ARG GODOT_ARM64_SHA256
+ARG GODOT_TEMPLATES_URL
+ARG GODOT_TEMPLATES_SHA256
+ARG INSTALL_GITHUB_CLI
+ARG INSTALL_GIT_LFS
+ARG INSTALL_IMAGE_TOOLS
+ARG INSTALL_SSH
+ARG INSTALL_VSCODE_CLI
+ARG VSCODE_AMD64_URL
+ARG VSCODE_AMD64_SHA256
+ARG VSCODE_ARM64_URL
+ARG VSCODE_ARM64_SHA256
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+RUN set -eux; \
+    case "$TARGETARCH" in {{SUPPORTED_ARCH_PATTERN}}) ;; *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        bash ca-certificates curl git gnupg jq python3 unzip xauth xvfb \
+        libasound2 libfontconfig1 libgl1 libglu1-mesa libpulse0 libx11-6 \
+        libxcursor1 libxext6 libxi6 libxinerama1 libxrandr2 libxrender1; \
+    if [ "$INSTALL_GITHUB_CLI" = true ]; then apt-get install -y --no-install-recommends gh; fi; \
+    if [ "$INSTALL_GIT_LFS" = true ]; then apt-get install -y --no-install-recommends git-lfs; fi; \
+    if [ "$INSTALL_IMAGE_TOOLS" = true ]; then apt-get install -y --no-install-recommends imagemagick optipng pngquant; fi; \
+    if [ "$INSTALL_SSH" = true ]; then \
+        apt-get install -y --no-install-recommends openssh-server; \
+        mkdir -p /run/sshd; \
+        printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'PermitRootLogin no' 'PubkeyAuthentication yes' > /etc/ssh/sshd_config.d/99-devcontainer.conf; \
+        ssh-keygen -A; \
+    fi; \
+    if [ "$INSTALL_VSCODE_CLI" = true ]; then \
+        case "$TARGETARCH" in \
+          amd64) vscode_package_url="$VSCODE_AMD64_URL"; vscode_package_sha256="$VSCODE_AMD64_SHA256" ;; \
+          arm64) vscode_package_url="$VSCODE_ARM64_URL"; vscode_package_sha256="$VSCODE_ARM64_SHA256" ;; \
+        esac; \
+        curl -fL --retry 3 --output /tmp/vscode.deb "$vscode_package_url"; \
+        printf '%s  %s\n' "$vscode_package_sha256" /tmp/vscode.deb | sha256sum --check --strict -; \
+        apt-get install -y --no-install-recommends /tmp/vscode.deb; \
+        rm -f /tmp/vscode.deb; \
+        printf '%s\n' '#!/usr/bin/env sh' 'exec /usr/share/code/bin/code --user-data-dir /home/vscode/.vscode-data/user --extensions-dir /home/vscode/.vscode-data/extensions "$@"' > /usr/local/bin/code-cli; \
+        chmod 0755 /usr/local/bin/code-cli; \
+        rm -f /usr/bin/code; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY .devcontainer/install-godot.sh /usr/local/share/setup-godot/install-godot.sh
+RUN chmod 0755 /usr/local/share/setup-godot/install-godot.sh && \
+    /usr/local/share/setup-godot/install-godot.sh
+
+ENV PATH="/home/vscode/.local/bin:${PATH}"
+ENV GODOT_DATA_PATH="/home/vscode/.local/share/godot"
+ENV DONT_PROMPT_WSL_INSTALL="1"

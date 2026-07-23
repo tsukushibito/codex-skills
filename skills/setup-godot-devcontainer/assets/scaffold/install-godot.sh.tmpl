@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${TARGETARCH:-}" in
+{{ARCHIVE_CASES}}
+  *)
+    echo "Unsupported architecture: ${TARGETARCH:-unset}; expected {{SUPPORTED_ARCH_PATTERN}}." >&2
+    exit 1
+    ;;
+esac
+
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+
+curl -fL --retry 3 --output "$work_dir/godot.zip" "$archive_url"
+printf '%s  %s\n' "$archive_sha256" "$work_dir/godot.zip" | sha256sum --check --strict -
+unzip -q "$work_dir/godot.zip" -d "$work_dir/godot"
+
+install_dir="/opt/godot/$GODOT_VERSION-$GODOT_FLAVOR"
+mkdir -p "$install_dir"
+cp -a "$work_dir/godot/." "$install_dir/"
+godot_binary="$(find "$install_dir" -type f -name 'Godot*' -perm /111 -print -quit)"
+if [[ -z "$godot_binary" ]]; then
+  echo "Godot executable was not found in the verified archive." >&2
+  exit 1
+fi
+ln -sf "$godot_binary" /usr/local/bin/godot
+
+curl -fL --retry 3 --output "$work_dir/templates.tpz" "$GODOT_TEMPLATES_URL"
+printf '%s  %s\n' "$GODOT_TEMPLATES_SHA256" "$work_dir/templates.tpz" | sha256sum --check --strict -
+unzip -q "$work_dir/templates.tpz" -d "$work_dir/templates"
+template_version="${GODOT_VERSION/-/.}"
+template_dir="/home/vscode/.local/share/godot/export_templates/$template_version"
+mkdir -p "$template_dir"
+if [[ -d "$work_dir/templates/templates" ]]; then
+  cp -a "$work_dir/templates/templates/." "$template_dir/"
+else
+  cp -a "$work_dir/templates/." "$template_dir/"
+fi
+chown -R vscode:vscode /home/vscode/.local

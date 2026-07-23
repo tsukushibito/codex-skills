@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+project_dir="${GODOT_PROJECT_DIR:-{{PROJECT_DIR}}}"
+project_root="$workspace_root/$project_dir"
+artifact_dir="$workspace_root/${GODOT_ARTIFACT_DIR:-.artifacts/godot}"
+
+if [[ ! -f "$project_root/project.godot" ]]; then
+  echo "project.godot was not found at $project_root" >&2
+  exit 1
+fi
+
+mkdir -p "$artifact_dir"
+godot --headless --path "$project_root" --editor --quit \
+  2>&1 | tee "$artifact_dir/import.log"
+
+if grep -Eq '^run/main_scene\s*=\s*.+$' "$project_root/project.godot"; then
+  godot --headless --path "$project_root" --quit-after 5 \
+    2>&1 | tee "$artifact_dir/smoke.log"
+else
+  echo "No run/main_scene is configured; main-scene smoke test skipped."
+fi

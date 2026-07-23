@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+lock_file="$workspace_root/.devcontainer/toolchain.lock.json"
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Required command is missing: $1" >&2
+    return 1
+  fi
+}
+
+require_command godot
+require_command node
+require_command npm
+require_command codex
+require_command uv
+require_command gdlint
+require_command gdformat
+require_command git
+require_command python3
+if [[ "{{GODOT_FLAVOR}}" == dotnet ]]; then require_command dotnet; fi
+
+if [[ "{{INSTALL_GITHUB_CLI}}" == true ]]; then require_command gh; fi
+if [[ "{{INSTALL_GIT_LFS}}" == true ]]; then require_command git-lfs; fi
+if [[ "{{INSTALL_IMAGE_TOOLS}}" == true ]]; then
+  require_command convert
+  require_command optipng
+  require_command pngquant
+fi
+if [[ "{{INSTALL_SSH}}" == true ]]; then
+  require_command sshd
+  sudo /usr/sbin/sshd -t
+fi
+if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then require_command code-cli; fi
+
+python3 - "$lock_file" <<'PY'
+import json
+import re
+import subprocess
+import sys
+
+lock = json.load(open(sys.argv[1], encoding="utf-8"))
+commands = {
+    "godot": ["godot", "--version"],
+    "node": ["node", "--version"],
+    "codex": ["codex", "--version"],
+    "uv": ["uv", "--version"],
+    "gdtoolkit": ["gdlint", "--version"],
+    "vscode-cli": ["code-cli", "--version"],
+}
+for name, metadata in lock["tools"].items():
+    if not metadata.get("explicit") or name not in commands:
+        continue
+    if name == "vscode-cli" and "vscode-cli" not in lock.get("enabled_tools", []):
+        continue
+    output = subprocess.check_output(commands[name], text=True, stderr=subprocess.STDOUT).strip()
+    expected = str(metadata["version"])
+    normalized_output = re.sub(r"[^0-9A-Za-z]+", ".", output).lower()
+    normalized_expected = re.sub(r"[^0-9A-Za-z]+", ".", expected).lower().strip(".")
+    if normalized_expected not in normalized_output:
+        raise SystemExit(f"Pinned {name} version mismatch: expected {expected!r}, got {output!r}")
+PY
+
+godot_version="$(godot --version)"
+if [[ "$godot_version" != 4.* ]]; then
+  echo "Expected Godot 4.x, got: $godot_version" >&2
+  exit 1
+fi
+if [[ "{{GODOT_FLAVOR}}" == dotnet && "$godot_version" != *mono* ]]; then
+  echo "Expected the .NET/mono Godot build, got: $godot_version" >&2
+  exit 1
+fi
+if [[ "{{GODOT_FLAVOR}}" == gdscript && "$godot_version" == *mono* ]]; then
+  echo "Expected the standard GDScript Godot build, got: $godot_version" >&2
+  exit 1
+fi
+
+project_dir="${GODOT_PROJECT_DIR:-{{PROJECT_DIR}}}"
+if [[ ! -f "$workspace_root/$project_dir/project.godot" ]]; then
+  echo "NOTE: project.godot is not present at $project_dir yet; environment checks still passed."
+fi
+
+printf 'Godot: %s\n' "$godot_version"
+printf 'Node: %s\n' "$(node --version)"
+printf 'Codex: %s\n' "$(codex --version)"
+printf 'uv: %s\n' "$(uv --version)"
+printf 'gdtoolkit: %s\n' "$(gdlint --version)"
+if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then printf 'VS Code CLI: %s\n' "$(code-cli --version | head -n 1)"; fi

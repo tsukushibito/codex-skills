@@ -1,0 +1,4 @@
+interface:
+  display_name: "Godot DevContainer Setup"
+  short_description: "Safely plan and build Godot DevContainers"
+  default_prompt: "Use $setup-godot-devcontainer to inspect this repository, show a reproducible Godot Dev Container plan, merge it safely, and validate the result."

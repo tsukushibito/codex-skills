@@ -1,0 +1,13 @@
+; Minimal fixture for Dev Container smoke validation.
+; No main scene is intentional: runtime smoke should be skipped.
+
+config_version=5
+
+[application]
+
+config/name="Godot DevContainer Skill Smoke"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
