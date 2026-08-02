@@ -3,7 +3,7 @@
 Reusable Codex skills for development environments, automation, and project
 workflows.
 
-## Available skill
+## Available skills
 
 ### `setup-godot-devcontainer`
 
@@ -24,3 +24,21 @@ Run the bundled tests with:
 ```bash
 python -m unittest discover -s skills/setup-godot-devcontainer/scripts/tests -v
 ```
+
+### `design-build-validate-ui`
+
+This skill designs, critiques, implements, and visually validates new or existing
+UI across games, web, desktop, and mobile. It routes evaluation, design, and
+implementation requests separately; starts existing-UI work from the actual
+render; starts greenfield work from users, tasks, states, devices, and inputs; and
+requires implemented screens to re-enter a render-inspect-correct loop.
+
+Install it with the bundled Codex skill installer:
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
+  --repo tsukushibito/codex-skills \
+  --path skills/design-build-validate-ui
+```
+
+Invoke it as `$design-build-validate-ui`.

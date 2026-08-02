@@ -1,0 +1,4 @@
+interface:
+  display_name: "UI Design, Build & Validation"
+  short_description: "Design, implement, render, and validate usable UI"
+  default_prompt: "Use $design-build-validate-ui to design, implement, render, and validate this UI."
