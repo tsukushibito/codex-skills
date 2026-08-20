@@ -2,7 +2,9 @@
 set -euo pipefail
 
 workspace_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-persistent_paths=(/home/vscode/.local /home/vscode/.cache /home/vscode/.codex)
+persistent_paths=(/home/vscode/.local /home/vscode/.cache/godot /home/vscode/.cache/uv /home/vscode/.codex)
+if [[ "{{GPU_MODE}}" == nvidia ]]; then persistent_paths+=(/home/vscode/.cache/inference); fi
+if [[ "{{WORKTREE_MODE}}" == volume ]]; then persistent_paths+=("$workspace_root/.worktree"); fi
 if [[ "{{INSTALL_GITHUB_CLI}}" == true ]]; then persistent_paths+=(/home/vscode/.config/gh); fi
 if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then persistent_paths+=(/home/vscode/.vscode-data); fi
 if [[ "{{INSTALL_SSH}}" == true ]]; then persistent_paths+=(/home/vscode/.ssh); fi
@@ -12,6 +14,9 @@ mkdir -p /home/vscode/.local/bin
 
 if git -C "$workspace_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git config --global --add safe.directory "$workspace_root"
+  if [[ "{{WORKTREE_MODE}}" == volume ]]; then
+    bash "$workspace_root/scripts/dev/manage_worktree.sh" lock-existing
+  fi
   if [[ "{{INSTALL_GIT_LFS}}" == true ]]; then
     git -C "$workspace_root" lfs install --local
   fi

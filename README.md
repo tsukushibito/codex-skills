@@ -13,7 +13,11 @@ small set of configuration files, and validates the result.
 
 The default environment includes Godot 4.x, export templates, Node.js, Codex CLI,
 uv, gdtoolkit, GitHub CLI, Git LFS, image tooling, SSH, and the VS Code CLI exposed
-as `code-cli`. Godot downloads are architecture-specific and checksum-verified.
+as `code-cli`. Optional NVIDIA inference GPU access uses a separate persistent
+model cache, while managed task worktrees default to a locked container-native
+volume. Godot downloads are architecture-specific and checksum-verified. Creation
+and modification require explicit approval of every configurable choice before
+planning and approval of the resolved plan before applying it.
 
 To use the skill from a Git checkout, install or link the
 `skills/setup-godot-devcontainer` directory into your Codex skills directory, then

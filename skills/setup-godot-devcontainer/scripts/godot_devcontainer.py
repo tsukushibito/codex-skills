@@ -36,6 +36,11 @@ LOCK_SCHEMA = 1
 SAFE_MERGE_PATHS = {".gitignore", ".gitattributes", ".codex/config.toml"}
 OPTIONAL_TOOLS = {"github-cli", "git-lfs", "image-tools", "ssh", "vscode-cli"}
 ALL_ARCHITECTURES = {"amd64", "arm64"}
+GPU_MODES = {"off", "nvidia"}
+WORKTREE_MODES = {"host", "volume"}
+INSTRUCTION_START = "<!-- setup-godot-devcontainer:start -->"
+INSTRUCTION_END = "<!-- setup-godot-devcontainer:end -->"
+DISCOVERY_SKIP_DIRS = {".git", ".godot", ".venv", ".worktree", "node_modules"}
 
 
 class SetupError(RuntimeError):
@@ -324,10 +329,15 @@ def resolve_toolchain(args: argparse.Namespace, architectures: list[str], enable
 
 def detect_projects(target: Path) -> list[str]:
     projects: list[str] = []
-    for path in target.rglob("project.godot"):
-        if any(part in {".git", ".worktree", ".godot"} for part in path.relative_to(target).parts):
-            continue
-        projects.append(path.parent.relative_to(target).as_posix() or ".")
+    for current, directories, files in os.walk(target, topdown=True, followlinks=False):
+        current_path = Path(current)
+        directories[:] = [
+            name
+            for name in directories
+            if name not in DISCOVERY_SKIP_DIRS and not (current_path / name).is_symlink()
+        ]
+        if "project.godot" in files:
+            projects.append(current_path.relative_to(target).as_posix() or ".")
     return sorted(projects)
 
 
@@ -385,6 +395,92 @@ def inspect_target(target: Path) -> dict[str, Any]:
         findings.append("A fixed SSH host port was found; make fixed publishing optional and configurable.")
         if fixed_ssh.group(1) != "127.0.0.1":
             findings.append("The fixed SSH host-port mapping is not explicitly loopback-only.")
+    gpu_signals: dict[str, Any] = {
+        "mode": "off",
+        "requested": False,
+        "host_required": False,
+        "visible_devices": None,
+        "driver_capabilities": None,
+        "software_rendering": False,
+    }
+    storage_signals: dict[str, Any] = {
+        "worktrees": "host",
+        "godot_cache": "none",
+        "inference_cache": "none",
+        "broad_home_cache": False,
+        "instruction_path": None,
+        "instruction_linked": False,
+        "lock_helper": (target / "scripts" / "dev" / "manage_worktree.sh").is_file(),
+    }
+    devcontainer_config = target / ".devcontainer" / "devcontainer.json"
+    if devcontainer_config.is_file():
+        try:
+            config = json.loads(strip_jsonc(devcontainer_config.read_text(encoding="utf-8")))
+            run_args = [str(item) for item in config.get("runArgs", [])]
+            container_env = config.get("containerEnv", {})
+            mounts = [str(item) for item in config.get("mounts", [])]
+            gpu_requested = any(item == "--gpus" or item.startswith("--gpus=") for item in run_args)
+            visible_devices = container_env.get("NVIDIA_VISIBLE_DEVICES")
+            driver_capabilities = container_env.get("NVIDIA_DRIVER_CAPABILITIES")
+            capability_set = {
+                item.strip() for item in str(driver_capabilities or "").split(",") if item.strip()
+            }
+            inference_env = visible_devices == "all" and {"compute", "utility"} <= capability_set
+            has_nvidia_env = visible_devices is not None or driver_capabilities is not None
+            if gpu_requested and inference_env:
+                gpu_mode = "nvidia-inference"
+            elif gpu_requested:
+                gpu_mode = "gpu-requested"
+            elif has_nvidia_env:
+                gpu_mode = "inconsistent"
+            else:
+                gpu_mode = "off"
+            if gpu_requested != has_nvidia_env:
+                findings.append(
+                    "GPU request and NVIDIA container environment are inconsistent; configure both or neither."
+                )
+            gpu_signals = {
+                "mode": gpu_mode,
+                "requested": gpu_requested,
+                "host_required": config.get("hostRequirements", {}).get("gpu") is True,
+                "visible_devices": visible_devices,
+                "driver_capabilities": driver_capabilities,
+                "software_rendering": container_env.get("LIBGL_ALWAYS_SOFTWARE") == "1",
+            }
+            worktree_mount = any("target=/workspaces/${localWorkspaceFolderBasename}/.worktree" in item for item in mounts)
+            godot_cache_mount = any("target=/home/vscode/.cache/godot" in item for item in mounts)
+            inference_cache_mount = any("target=/home/vscode/.cache/inference" in item for item in mounts)
+            broad_home_cache = any("target=/home/vscode/.cache," in item for item in mounts)
+            instruction_path = active_instruction_path(target)
+            instruction_file = target / instruction_path
+            instruction_text = instruction_file.read_text(encoding="utf-8", errors="replace") if instruction_file.is_file() else ""
+            instruction_linked = (
+                INSTRUCTION_START in instruction_text
+                and ".devcontainer/storage-policy.md" in instruction_text
+            )
+            if broad_home_cache:
+                findings.append("A broad /home/vscode/.cache volume hides unrelated caches; split it by purpose.")
+            inference_env_keys = {
+                "INFERENCE_CACHE_DIR", "HF_HUB_CACHE", "HF_XET_CACHE", "HF_ASSETS_CACHE", "TORCH_HOME"
+            }
+            has_inference_env = any(key in container_env for key in inference_env_keys)
+            if inference_cache_mount != has_inference_env:
+                findings.append("Inference cache mount and inference cache environment are inconsistent.")
+            if worktree_mount and not (target / "scripts" / "dev" / "manage_worktree.sh").is_file():
+                findings.append("A worktree volume is configured without the managed lock helper.")
+            if (worktree_mount or inference_cache_mount) and not instruction_linked:
+                findings.append("The active Codex project instruction does not link to the storage policy.")
+            storage_signals = {
+                "worktrees": "volume" if worktree_mount else "host",
+                "godot_cache": "volume" if godot_cache_mount else "none",
+                "inference_cache": "volume" if inference_cache_mount else "none",
+                "broad_home_cache": broad_home_cache,
+                "instruction_path": instruction_path,
+                "instruction_linked": instruction_linked,
+                "lock_helper": (target / "scripts" / "dev" / "manage_worktree.sh").is_file(),
+            }
+        except (json.JSONDecodeError, SetupError):
+            findings.append("Existing .devcontainer/devcontainer.json is not valid JSON/JSONC.")
     codex_policy: dict[str, Any] | None = None
     codex_path = target / ".codex" / "config.toml"
     if codex_path.is_file():
@@ -408,6 +504,8 @@ def inspect_target(target: Path) -> dict[str, Any]:
             "arm64_or_aarch64": has_arm64,
             "docker_targetarch": has_targetarch,
         },
+        "gpu_signals": gpu_signals,
+        "storage_signals": storage_signals,
         "codex_policy": codex_policy,
         "findings": findings,
     }
@@ -480,6 +578,40 @@ def merge_codex_config(existing: str) -> str:
     return "\n".join(output).rstrip() + "\n"
 
 
+def project_fallback_filenames(target: Path) -> list[str]:
+    config = target / ".codex" / "config.toml"
+    if not config.is_file():
+        return []
+    try:
+        parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    values = parsed.get("project_doc_fallback_filenames", [])
+    return [value for value in values if isinstance(value, str) and value]
+
+
+def active_instruction_path(target: Path) -> str:
+    candidates = ["AGENTS.override.md", "AGENTS.md", *project_fallback_filenames(target)]
+    for relative in candidates:
+        path = target / relative
+        if path.is_file() and path.read_text(encoding="utf-8", errors="replace").strip():
+            return relative
+    return "AGENTS.md"
+
+
+def merge_managed_instruction(existing: str, managed: str) -> str:
+    existing = normalize_newlines(existing)
+    pattern = re.compile(
+        re.escape(INSTRUCTION_START) + r".*?" + re.escape(INSTRUCTION_END), re.DOTALL
+    )
+    block = managed.strip()
+    if pattern.search(existing):
+        result = pattern.sub(block, existing, count=1)
+        return result.rstrip() + "\n"
+    prefix = existing.rstrip()
+    return (prefix + "\n\n" if prefix else "") + block + "\n"
+
+
 def chosen_project(target: Path, requested: str | None) -> str:
     if requested:
         project = Path(requested).as_posix().strip("/") or "."
@@ -500,6 +632,8 @@ def build_candidates(
     enabled: set[str],
     ssh_mode: str,
     ssh_port: int | None,
+    gpu_mode: str,
+    worktree_mode: str,
     lock: dict[str, Any],
 ) -> dict[str, str]:
     tools = lock["tools"]
@@ -513,18 +647,28 @@ def build_candidates(
     )
     forward_ports: list[int] = []
     ports_attributes: dict[str, Any] = {}
-    run_args: list[str] = []
+    run_args: list[str] = ["--gpus=all"] if gpu_mode == "nvidia" else []
     if ssh_mode == "vscode" and "ssh" in enabled:
         forward_ports = [22]
         ports_attributes = {"22": {"label": "SSH", "onAutoForward": "notify"}}
     elif ssh_mode == "fixed" and "ssh" in enabled:
         assert ssh_port is not None
-        run_args = ["-p", f"127.0.0.1:{ssh_port}:22"]
+        run_args.extend(["-p", f"127.0.0.1:{ssh_port}:22"])
 
     mounts = [
         "source=${localWorkspaceFolderBasename}-codex,target=/home/vscode/.codex,type=volume",
-        "source=${localWorkspaceFolderBasename}-godot-cache,target=/home/vscode/.cache,type=volume",
+        "source=${localWorkspaceFolderBasename}-godot-cache,target=/home/vscode/.cache/godot,type=volume",
     ]
+    if worktree_mode == "volume":
+        mounts.append(
+            "source=${localWorkspaceFolderBasename}-worktrees,"
+            "target=/workspaces/${localWorkspaceFolderBasename}/.worktree,type=volume"
+        )
+    if gpu_mode == "nvidia":
+        mounts.append(
+            "source=${localWorkspaceFolderBasename}-inference-cache,"
+            "target=/home/vscode/.cache/inference,type=volume"
+        )
     if "github-cli" in enabled:
         mounts.append("source=${localWorkspaceFolderBasename}-gh,target=/home/vscode/.config/gh,type=volume")
     if "vscode-cli" in enabled:
@@ -552,6 +696,27 @@ def build_candidates(
         prefix = architecture.upper()
         build_args[f"GODOT_{prefix}_URL"] = assets[architecture]["url"]
         build_args[f"GODOT_{prefix}_SHA256"] = assets[architecture]["sha256"]
+    host_requirements: dict[str, Any] = {"cpus": 2, "memory": "4gb"}
+    container_env = {
+        "CODEX_HOME": "/home/vscode/.codex",
+        "GODOT_PROJECT_DIR": project_dir,
+        "GODOT_ARTIFACT_DIR": ".artifacts/godot",
+        "LIBGL_ALWAYS_SOFTWARE": "1",
+    }
+    if gpu_mode == "nvidia":
+        host_requirements["gpu"] = True
+        container_env.update(
+            {
+                "NVIDIA_VISIBLE_DEVICES": "all",
+                "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+                "INFERENCE_CACHE_DIR": "/home/vscode/.cache/inference",
+                "HF_HUB_CACHE": "/home/vscode/.cache/inference/huggingface/hub",
+                "HF_XET_CACHE": "/home/vscode/.cache/inference/huggingface/xet",
+                "HF_ASSETS_CACHE": "/home/vscode/.cache/inference/huggingface/assets",
+                "TORCH_HOME": "/home/vscode/.cache/inference/torch",
+            }
+        )
+
     devcontainer = {
         "name": "Godot Development",
         "build": {"dockerfile": "Dockerfile", "context": "..", "args": build_args},
@@ -561,13 +726,8 @@ def build_candidates(
         "remoteUser": "vscode",
         "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
         "init": True,
-        "hostRequirements": {"cpus": 2, "memory": "4gb"},
-        "containerEnv": {
-            "CODEX_HOME": "/home/vscode/.codex",
-            "GODOT_PROJECT_DIR": project_dir,
-            "GODOT_ARTIFACT_DIR": ".artifacts/godot",
-            "LIBGL_ALWAYS_SOFTWARE": "1",
-        },
+        "hostRequirements": host_requirements,
+        "containerEnv": container_env,
         "remoteEnv": {"PATH": "/home/vscode/.local/bin:${containerEnv:PATH}"},
         "mounts": mounts,
         "forwardPorts": forward_ports,
@@ -590,6 +750,12 @@ def build_candidates(
             "project_dir": project_dir,
             "enabled_tools": enabled_list,
             "ssh": {"mode": ssh_mode, "host_port": ssh_port},
+            "gpu": {"mode": gpu_mode},
+            "volumes": {
+                "worktrees": worktree_mode,
+                "godot_cache": "volume",
+                "inference_cache": "volume" if gpu_mode == "nvidia" else "off",
+            },
         }
     )
     values = {
@@ -614,7 +780,16 @@ def build_candidates(
         "INSTALL_IMAGE_TOOLS": str("image-tools" in enabled).lower(),
         "INSTALL_SSH": str("ssh" in enabled).lower(),
         "INSTALL_VSCODE_CLI": str("vscode-cli" in enabled).lower(),
+        "GPU_MODE": gpu_mode,
+        "WORKTREE_MODE": worktree_mode,
     }
+    instruction_path = active_instruction_path(target)
+    instruction_block = (
+        f"{INSTRUCTION_START}\n"
+        "- Before creating DevContainer Worktrees or downloading inference models, read "
+        "[.devcontainer/storage-policy.md](.devcontainer/storage-policy.md).\n"
+        f"{INSTRUCTION_END}\n"
+    )
     candidates = {
         ".devcontainer/devcontainer.json": json_text(devcontainer),
         ".devcontainer/toolchain.lock.json": json_text(lock),
@@ -622,12 +797,16 @@ def build_candidates(
         ".devcontainer/install-godot.sh": template("install-godot.sh.tmpl", values),
         ".devcontainer/post-create.sh": template("post-create.sh.tmpl", values),
         ".devcontainer/start-sshd.sh": template("start-sshd.sh.tmpl", values),
+        ".devcontainer/storage-policy.md": template("storage-policy.md.tmpl", values),
         "scripts/dev/verify_env.sh": template("verify_env.sh.tmpl", values),
         "scripts/dev/verify_godot_headless.sh": template("verify_godot_headless.sh.tmpl", values),
         ".codex/config.toml": 'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n',
         ".gitignore": template("gitignore.fragment", values),
         ".gitattributes": template("gitattributes.fragment", values),
+        instruction_path: instruction_block,
     }
+    if worktree_mode == "volume":
+        candidates["scripts/dev/manage_worktree.sh"] = template("manage_worktree.sh.tmpl", values)
     return candidates
 
 
@@ -638,6 +817,8 @@ def merged_candidate(relative: str, existing: str, generated: str) -> str:
         return merge_lines(existing, generated, "setup-godot-devcontainer")
     if relative == ".codex/config.toml":
         return merge_codex_config(existing)
+    if INSTRUCTION_START in generated and INSTRUCTION_END in generated:
+        return merge_managed_instruction(existing, generated)
     return generated
 
 
@@ -675,10 +856,23 @@ def create_plan(args: argparse.Namespace) -> dict[str, Any]:
         raise SetupError("--ssh-port must be between 1 and 65535.")
     if args.ssh_mode != "fixed" and args.ssh_port is not None:
         raise SetupError("--ssh-port is only valid with --ssh-mode fixed.")
+    if args.gpu_mode not in GPU_MODES:
+        raise SetupError("--gpu-mode accepts only off and nvidia.")
+    if args.worktree_mode not in WORKTREE_MODES:
+        raise SetupError("--worktree-mode accepts only host and volume.")
 
     lock = resolve_toolchain(args, architectures, enabled)
     candidates = build_candidates(
-        target, project_dir, flavor, architectures, enabled, args.ssh_mode, args.ssh_port, lock
+        target,
+        project_dir,
+        flavor,
+        architectures,
+        enabled,
+        args.ssh_mode,
+        args.ssh_port,
+        args.gpu_mode,
+        args.worktree_mode,
+        lock,
     )
     operations: list[dict[str, Any]] = []
     for relative, generated in candidates.items():
@@ -690,7 +884,9 @@ def create_plan(args: argparse.Namespace) -> dict[str, Any]:
             action = "unchanged"
         elif not path.exists():
             action = "create"
-        elif relative in SAFE_MERGE_PATHS:
+        elif relative in SAFE_MERGE_PATHS or (
+            INSTRUCTION_START in generated and INSTRUCTION_END in generated
+        ):
             action = "merge"
         else:
             action = "conflict"
@@ -715,6 +911,8 @@ def create_plan(args: argparse.Namespace) -> dict[str, Any]:
             "enabled_tools": sorted(enabled),
             "ssh_mode": args.ssh_mode,
             "ssh_port": args.ssh_port,
+            "gpu_mode": args.gpu_mode,
+            "worktree_mode": args.worktree_mode,
         },
         "operations": operations,
     }
@@ -727,6 +925,8 @@ def print_plan(plan: dict[str, Any]) -> None:
         f"Godot flavor: {selection['flavor']}\n"
         f"Architectures: {', '.join(selection['architectures'])}\n"
         f"SSH mode: {selection['ssh_mode']}\n"
+        f"GPU mode: {selection['gpu_mode']}\n"
+        f"Worktree mode: {selection['worktree_mode']}\n"
     )
     for operation in plan["operations"]:
         print(f"[{operation['action']}] {operation['path']}")
@@ -830,7 +1030,14 @@ def strip_jsonc(value: str) -> str:
 def run_checked(command: list[str], cwd: Path) -> tuple[bool, str]:
     try:
         completed = subprocess.run(
-            command, cwd=cwd, text=True, capture_output=True, timeout=1800, check=False
+            command,
+            cwd=cwd,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=1800,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
@@ -874,6 +1081,16 @@ def static_validate(target: Path) -> list[str]:
             errors.append("toolchain lock must contain one or more unique architectures")
         if lock.get("flavor") not in {"gdscript", "dotnet"}:
             errors.append("toolchain lock has an invalid Godot flavor")
+        if lock.get("gpu", {}).get("mode", "off") not in GPU_MODES:
+            errors.append("toolchain lock has an invalid GPU mode")
+        volumes = lock.get("volumes")
+        if volumes is not None:
+            if volumes.get("worktrees") not in WORKTREE_MODES:
+                errors.append("toolchain lock has an invalid worktree volume mode")
+            if volumes.get("godot_cache") != "volume":
+                errors.append("toolchain lock must enable the Godot cache volume")
+            if volumes.get("inference_cache") not in {"off", "volume"}:
+                errors.append("toolchain lock has an invalid inference cache mode")
         required_tools = {"godot", "node", "codex", "uv", "gdtoolkit"}
         required_tools.update(set(lock.get("enabled_tools", [])) & {"vscode-cli"})
         missing_tools = required_tools - set(lock.get("tools", {}))
@@ -930,6 +1147,7 @@ def static_validate(target: Path) -> list[str]:
         ssh = lock.get("ssh", {})
         run_args = config.get("runArgs", [])
         forward_ports = config.get("forwardPorts", [])
+        ssh_publish = any(re.fullmatch(r"(?:127\.0\.0\.1|0\.0\.0\.0):\d{1,5}:22", str(item)) for item in run_args)
         if any("0.0.0.0:" in str(item) for item in run_args):
             errors.append("SSH host publishing must not bind to 0.0.0.0")
         if ssh.get("mode") == "vscode" and "ssh" in enabled and 22 not in forward_ports:
@@ -938,8 +1156,87 @@ def static_validate(target: Path) -> list[str]:
             mapping = f"127.0.0.1:{ssh.get('host_port')}:22"
             if mapping not in run_args:
                 errors.append("fixed SSH mode must use its loopback-only host mapping")
-        if (ssh.get("mode") == "off" or "ssh" not in enabled) and (22 in forward_ports or run_args):
+        if (ssh.get("mode") == "off" or "ssh" not in enabled) and (22 in forward_ports or ssh_publish):
             errors.append("disabled SSH must not publish or forward a port")
+        gpu_mode = lock.get("gpu", {}).get("mode", "off")
+        gpu_args = [str(item) for item in run_args if str(item) == "--gpus" or str(item).startswith("--gpus=")]
+        host_gpu = config.get("hostRequirements", {}).get("gpu")
+        container_env = config.get("containerEnv", {})
+        if gpu_mode == "nvidia":
+            if gpu_args != ["--gpus=all"]:
+                errors.append("NVIDIA GPU mode must request all GPUs exactly once")
+            if host_gpu is not True:
+                errors.append("NVIDIA GPU mode must require a GPU host")
+            if container_env.get("NVIDIA_VISIBLE_DEVICES") != "all":
+                errors.append("NVIDIA GPU mode must expose all selected devices")
+            if container_env.get("NVIDIA_DRIVER_CAPABILITIES") != "compute,utility":
+                errors.append("NVIDIA GPU mode must expose compute and utility capabilities")
+            if container_env.get("LIBGL_ALWAYS_SOFTWARE") != "1":
+                errors.append("NVIDIA GPU mode must keep Godot on software rendering")
+        elif gpu_mode == "off":
+            if gpu_args:
+                errors.append("disabled GPU mode must not request GPUs")
+            if host_gpu is True:
+                errors.append("disabled GPU mode must not require a GPU host")
+            if "NVIDIA_VISIBLE_DEVICES" in container_env or "NVIDIA_DRIVER_CAPABILITIES" in container_env:
+                errors.append("disabled GPU mode must not set NVIDIA container environment")
+        volumes = lock.get("volumes")
+        if volumes is not None:
+            mounts = [str(item) for item in config.get("mounts", [])]
+            worktree_mount = (
+                "source=${localWorkspaceFolderBasename}-worktrees,"
+                "target=/workspaces/${localWorkspaceFolderBasename}/.worktree,type=volume"
+            )
+            godot_mount = (
+                "source=${localWorkspaceFolderBasename}-godot-cache,"
+                "target=/home/vscode/.cache/godot,type=volume"
+            )
+            inference_mount = (
+                "source=${localWorkspaceFolderBasename}-inference-cache,"
+                "target=/home/vscode/.cache/inference,type=volume"
+            )
+            if godot_mount not in mounts:
+                errors.append("Godot cache volume must mount at /home/vscode/.cache/godot")
+            if any("target=/home/vscode/.cache," in item for item in mounts):
+                errors.append("broad /home/vscode/.cache volumes are not allowed")
+            if volumes.get("worktrees") == "volume":
+                if worktree_mount not in mounts:
+                    errors.append("volume worktree mode must mount the managed .worktree directory")
+                helper = target / "scripts" / "dev" / "manage_worktree.sh"
+                if not helper.is_file():
+                    errors.append("volume worktree mode requires scripts/dev/manage_worktree.sh")
+            elif worktree_mount in mounts:
+                errors.append("host worktree mode must not mount the managed worktree volume")
+            inference_env = {
+                "INFERENCE_CACHE_DIR": "/home/vscode/.cache/inference",
+                "HF_HUB_CACHE": "/home/vscode/.cache/inference/huggingface/hub",
+                "HF_XET_CACHE": "/home/vscode/.cache/inference/huggingface/xet",
+                "HF_ASSETS_CACHE": "/home/vscode/.cache/inference/huggingface/assets",
+                "TORCH_HOME": "/home/vscode/.cache/inference/torch",
+            }
+            if volumes.get("inference_cache") == "volume":
+                if gpu_mode != "nvidia":
+                    errors.append("inference cache volume requires NVIDIA GPU mode")
+                if inference_mount not in mounts:
+                    errors.append("NVIDIA mode must mount the inference cache volume")
+                for key, value in inference_env.items():
+                    if container_env.get(key) != value:
+                        errors.append(f"NVIDIA mode must set {key} to the managed inference cache")
+                if "HF_HOME" in container_env:
+                    errors.append("NVIDIA mode must not override HF_HOME")
+            else:
+                if inference_mount in mounts:
+                    errors.append("disabled inference cache must not be mounted")
+                for key in inference_env:
+                    if key in container_env:
+                        errors.append(f"disabled inference cache must not set {key}")
+            if not (target / ".devcontainer" / "storage-policy.md").is_file():
+                errors.append("managed volume configuration requires .devcontainer/storage-policy.md")
+            instruction_path = active_instruction_path(target)
+            instruction_file = target / instruction_path
+            instruction_text = instruction_file.read_text(encoding="utf-8", errors="replace") if instruction_file.is_file() else ""
+            if INSTRUCTION_START not in instruction_text or ".devcontainer/storage-policy.md" not in instruction_text:
+                errors.append(f"active Codex instruction {instruction_path} must link to the storage policy")
         if "vscode-cli" in enabled:
             packages = tools.get("vscode-cli", {}).get("packages", {})
             for architecture in lock.get("architectures", []):
@@ -974,16 +1271,23 @@ def static_validate(target: Path) -> list[str]:
         errors.append("remote install scripts are not allowed")
     bash = shutil.which("bash")
     if bash:
-        for relative in [
-            ".devcontainer/install-godot.sh",
-            ".devcontainer/post-create.sh",
-            ".devcontainer/start-sshd.sh",
-            "scripts/dev/verify_env.sh",
-            "scripts/dev/verify_godot_headless.sh",
-        ]:
-            ok, output = run_checked([bash, "-n", relative], target)
-            if not ok:
-                errors.append(f"shell syntax failed for {relative}: {output}")
+        bash_usable, _ = run_checked([bash, "--version"], target)
+        if bash_usable:
+            for relative in [
+                ".devcontainer/install-godot.sh",
+                ".devcontainer/post-create.sh",
+                ".devcontainer/start-sshd.sh",
+                "scripts/dev/verify_env.sh",
+                "scripts/dev/verify_godot_headless.sh",
+            ]:
+                ok, output = run_checked([bash, "-n", relative], target)
+                if not ok:
+                    errors.append(f"shell syntax failed for {relative}: {output}")
+            helper = target / "scripts" / "dev" / "manage_worktree.sh"
+            if helper.is_file():
+                ok, output = run_checked([bash, "-n", helper.relative_to(target).as_posix()], target)
+                if not ok:
+                    errors.append(f"shell syntax failed for scripts/dev/manage_worktree.sh: {output}")
     return errors
 
 
@@ -1030,6 +1334,8 @@ def add_common_plan_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--architectures", default="amd64,arm64")
     parser.add_argument("--ssh-mode", choices=["vscode", "fixed", "off"], default="vscode")
     parser.add_argument("--ssh-port", type=int)
+    parser.add_argument("--gpu-mode", choices=sorted(GPU_MODES), default="off")
+    parser.add_argument("--worktree-mode", choices=sorted(WORKTREE_MODES), default="volume")
     parser.add_argument("--disable-tool", action="append", default=[], choices=sorted(OPTIONAL_TOOLS))
     parser.add_argument("--godot-version")
     parser.add_argument("--node-version")

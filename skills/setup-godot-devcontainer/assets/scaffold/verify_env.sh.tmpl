@@ -21,6 +21,16 @@ require_command gdformat
 require_command git
 require_command python3
 if [[ "{{GODOT_FLAVOR}}" == dotnet ]]; then require_command dotnet; fi
+if [[ "{{GPU_MODE}}" == nvidia ]]; then require_command nvidia-smi; fi
+
+if [[ "{{WORKTREE_MODE}}" == volume ]]; then
+  bash "$workspace_root/scripts/dev/manage_worktree.sh" verify
+fi
+if [[ "{{GPU_MODE}}" == nvidia ]]; then
+  inference_cache="${INFERENCE_CACHE_DIR:-/home/vscode/.cache/inference}"
+  mkdir -p "$inference_cache"
+  [[ -w "$inference_cache" ]] || { echo "Inference cache is not writable: $inference_cache" >&2; exit 1; }
+fi
 
 if [[ "{{INSTALL_GITHUB_CLI}}" == true ]]; then require_command gh; fi
 if [[ "{{INSTALL_GIT_LFS}}" == true ]]; then require_command git-lfs; fi
@@ -97,3 +107,11 @@ printf 'Codex: %s\n' "$(codex --version)"
 printf 'uv: %s\n' "$(uv --version)"
 printf 'gdtoolkit: %s\n' "$(gdlint --version)"
 if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then printf 'VS Code CLI: %s\n' "$(printf '%s\n' "$vscode_cli_version" | head -n 1)"; fi
+if [[ "{{GPU_MODE}}" == nvidia ]]; then
+  gpu_info="$(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader)"
+  if [[ -z "$gpu_info" ]]; then
+    echo "NVIDIA GPU mode was selected, but nvidia-smi reported no GPU." >&2
+    exit 1
+  fi
+  printf 'NVIDIA GPU: %s\n' "$gpu_info"
+fi

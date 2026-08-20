@@ -1,6 +1,6 @@
 ---
 name: setup-godot-devcontainer
-description: Inspect, plan, create, merge, and validate a reproducible Dev Container for Godot 4.x GDScript or .NET projects. Use when Codex needs to add, migrate, repair, or audit `.devcontainer/`, Godot headless checks, container Codex policy, optional SSH, or a VS Code CLI exposed as `code-cli`, while preserving an existing repository and showing conflicts instead of overwriting files.
+description: Inspect, plan, create, merge, and validate a reproducible Dev Container for Godot 4.x GDScript or .NET projects. Use when Codex needs to add, migrate, repair, or audit `.devcontainer/`, Godot headless checks, container Codex policy, optional NVIDIA inference GPU access, optional SSH, or a VS Code CLI exposed as `code-cli`, while preserving an existing repository and showing conflicts instead of overwriting files.
 ---
 
 # Setup Godot DevContainer
@@ -16,15 +16,23 @@ version resolution, diffs, conflict handling, and validation follow one contract
   ignore rule, and validation script.
 - Treat repository instructions and existing user content as authoritative.
 - Keep the reusable scope limited to Godot, GDScript/.NET tooling, container-local
-  Codex, generic asset tools, SSH, editor integration, and generic validation.
-  Do not introduce Beads, worktree policy, review policy, game tests, telemetry,
+  Codex, generic asset tools, optional NVIDIA inference GPU access, SSH, editor
+  integration, and generic validation.
+  Do not introduce Beads, repository-specific review policy, game tests, telemetry,
   or production gates unless separately requested.
 - Generate `.codex/config.toml` for every scaffold. This Dev Container profile is
   intentionally trusted and must set `approval_policy = "never"` and
   `sandbox_mode = "danger-full-access"`. Preserve unrelated project config keys.
 - Never overwrite a complex existing file. Present its unified diff and require a
   manual merge. The only automatic merges are additive `.gitignore` and
-  `.gitattributes` entries plus the two required top-level Codex policy keys.
+  `.gitattributes` entries, the two required top-level Codex policy keys, and the
+  marked storage-policy link in the active root Codex instruction file.
+- Default to a container-native `.worktree` named volume. Generate the management
+  helper, lock every managed worktree, and refuse dirty or forced removal. Use
+  `--worktree-mode host` only when the user intentionally wants host-visible paths.
+- Mount Godot cache only at `/home/vscode/.cache/godot`. In NVIDIA mode, mount a
+  separate inference cache at `/home/vscode/.cache/inference`; never claim or mount
+  all of `/home/vscode/.cache`.
 - Do not expose SSH through a fixed host port unless the user selects that mode.
 - Do not claim support for an architecture unless the selected Godot release has
   a checksum-bearing artifact for it.
@@ -84,10 +92,10 @@ requirements. Read [dependency-resolution.md](references/dependency-resolution.m
 when version provenance, checksums, offline reuse, or upgrades matter.
 
 After planning, show the complete resolved selection, including exact versions,
-SSH host port when applicable, enabled tools, and every proposed file operation
-or diff. Require a second explicit user approval before `apply`. If resolution or
-repository inspection changes a previously confirmed value, return to the
-pre-plan checklist and reconfirm it.
+SSH host port when applicable, enabled tools, storage mode, and every proposed
+file operation or diff. Require a second explicit user approval before `apply`.
+If resolution or repository inspection changes a previously confirmed value,
+return to the pre-plan checklist and reconfirm it.
 
 Keep the plan path outside the target repository. The CLI enforces this so the
 planning phase remains read-only.
@@ -115,6 +123,13 @@ Review the resulting Git diff. Confirm that selected tools alone appear in the
 generated verifier and that no credentials, host-specific paths, fixed ports, or
 source-project workflow rules were added.
 
+Before creating a task worktree or downloading a model, read the generated
+`.devcontainer/storage-policy.md`. In volume mode, use
+`scripts/dev/manage_worktree.sh create <name> <branch> [start-point]` rather than
+creating a worktree directly. NVIDIA projects must place See-Through, DWPose, and
+other downloaded weights below `$INFERENCE_CACHE_DIR` or the generated framework
+cache variables so the downloads persist in the inference volume.
+
 ### 5. Validate progressively
 
 Run:
@@ -134,8 +149,8 @@ build fails, a project has no main scene, or generated Godot files need review.
 Report:
 
 - created, safely merged, manually merged, and unchanged files;
-- selected flavor, architectures, tool profile, SSH mode, and exact resolved
-  versions;
+- selected flavor, architectures, tool profile, GPU mode, SSH mode, and exact
+  resolved versions, plus worktree/storage mode;
 - static, container, headless import, and main-scene smoke results;
 - skipped checks and the exact reason;
 - remaining non-hermetic inputs, especially Debian package repository snapshots;
@@ -145,6 +160,8 @@ Report:
 
 - Stop before apply when the plan contains a conflict.
 - Stop when a requested release lacks a SHA-256 digest or a requested architecture.
+- Stop when NVIDIA mode is selected but the host cannot create a GPU-enabled
+  container or `nvidia-smi` cannot see a GPU. Do not silently fall back to CPU.
 - Stop when a baseline changes between plan and apply.
 - Keep static validation available when Docker or the Dev Container CLI is absent.
 - A missing `project.godot` is acceptable for a new-project environment check, but

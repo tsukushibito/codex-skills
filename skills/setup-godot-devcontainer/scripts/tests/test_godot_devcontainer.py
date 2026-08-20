@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +16,14 @@ SPEC = importlib.util.spec_from_file_location("godot_devcontainer", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+BASH = next(
+    (
+        str(path)
+        for path in [Path(r"C:\Program Files\Git\usr\bin\bash.exe"), Path(r"C:\Program Files\Git\bin\bash.exe")]
+        if path.is_file()
+    ),
+    None,
+)
 
 
 def fake_lock(path: Path) -> Path:
@@ -124,11 +135,33 @@ class PlannerTests(unittest.TestCase):
             self.assertEqual("gdscript", selection["flavor"])
             self.assertEqual(["amd64", "arm64"], selection["architectures"])
             self.assertEqual("vscode", selection["ssh_mode"])
+            self.assertEqual("off", selection["gpu_mode"])
+            self.assertEqual("volume", selection["worktree_mode"])
             self.assertEqual(MODULE.OPTIONAL_TOOLS, set(selection["enabled_tools"]))
             operations = {item["path"]: item for item in plan["operations"]}
             config = json.loads(operations[".devcontainer/devcontainer.json"]["content"])
             self.assertEqual([22], config["forwardPorts"])
             self.assertEqual([], config["runArgs"])
+            self.assertNotIn("gpu", config["hostRequirements"])
+            self.assertNotIn("NVIDIA_VISIBLE_DEVICES", config["containerEnv"])
+            self.assertIn(
+                "source=${localWorkspaceFolderBasename}-godot-cache,target=/home/vscode/.cache/godot,type=volume",
+                config["mounts"],
+            )
+            self.assertIn(
+                "source=${localWorkspaceFolderBasename}-worktrees,target=/workspaces/${localWorkspaceFolderBasename}/.worktree,type=volume",
+                config["mounts"],
+            )
+            self.assertNotIn("/home/vscode/.cache/inference", "\n".join(config["mounts"]))
+            lock_data = json.loads(operations[".devcontainer/toolchain.lock.json"]["content"])
+            self.assertEqual({"mode": "off"}, lock_data["gpu"])
+            self.assertEqual(
+                {"worktrees": "volume", "godot_cache": "volume", "inference_cache": "off"},
+                lock_data["volumes"],
+            )
+            self.assertIn("scripts/dev/manage_worktree.sh", operations)
+            self.assertIn(".devcontainer/storage-policy.md", operations)
+            self.assertIn("AGENTS.md", operations)
             self.assertEqual("https://example.invalid/code-amd64.deb", config["build"]["args"]["VSCODE_AMD64_URL"])
             self.assertEqual("a" * 64, config["build"]["args"]["VSCODE_AMD64_SHA256"])
             dockerfile = operations[".devcontainer/Dockerfile"]["content"]
@@ -139,10 +172,69 @@ class PlannerTests(unittest.TestCase):
                 verifier,
             )
             self.assertIn("rev-parse --is-inside-work-tree", operations[".devcontainer/post-create.sh"]["content"])
+            self.assertIn("/home/vscode/.cache/uv", operations[".devcontainer/post-create.sh"]["content"])
             self.assertEqual(
                 'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n',
                 operations[".codex/config.toml"]["content"],
             )
+
+    def test_nvidia_gpu_profile_is_inference_only_and_statically_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock, "--gpu-mode", "nvidia", "--ssh-mode", "off")
+            self.assertEqual("nvidia", plan["selection"]["gpu_mode"])
+            operations = {item["path"]: item for item in plan["operations"]}
+            config = json.loads(operations[".devcontainer/devcontainer.json"]["content"])
+            self.assertEqual(["--gpus=all"], config["runArgs"])
+            self.assertIs(True, config["hostRequirements"]["gpu"])
+            self.assertEqual("all", config["containerEnv"]["NVIDIA_VISIBLE_DEVICES"])
+            self.assertEqual(
+                "compute,utility", config["containerEnv"]["NVIDIA_DRIVER_CAPABILITIES"]
+            )
+            self.assertEqual("1", config["containerEnv"]["LIBGL_ALWAYS_SOFTWARE"])
+            self.assertEqual(
+                "/home/vscode/.cache/inference", config["containerEnv"]["INFERENCE_CACHE_DIR"]
+            )
+            self.assertNotIn("HF_HOME", config["containerEnv"])
+            self.assertIn(
+                "source=${localWorkspaceFolderBasename}-inference-cache,target=/home/vscode/.cache/inference,type=volume",
+                config["mounts"],
+            )
+            verifier = operations["scripts/dev/verify_env.sh"]["content"]
+            self.assertIn("require_command nvidia-smi", verifier)
+            self.assertIn("--query-gpu=name,memory.total,driver_version", verifier)
+            lock_data = json.loads(operations[".devcontainer/toolchain.lock.json"]["content"])
+            self.assertEqual({"mode": "nvidia"}, lock_data["gpu"])
+            self.assertEqual("volume", lock_data["volumes"]["inference_cache"])
+
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            MODULE.apply_plan(plan_path)
+            self.assertEqual([], MODULE.static_validate(root))
+
+            config["containerEnv"].pop("NVIDIA_DRIVER_CAPABILITIES")
+            (root / ".devcontainer" / "devcontainer.json").write_text(
+                json.dumps(config), encoding="utf-8"
+            )
+            self.assertIn(
+                "NVIDIA GPU mode must expose compute and utility capabilities",
+                MODULE.static_validate(root),
+            )
+
+    def test_static_validation_rejects_gpu_request_when_mode_is_off(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock)
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            MODULE.apply_plan(plan_path)
+            config_path = root / ".devcontainer" / "devcontainer.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["runArgs"] = ["--gpus=all"]
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            self.assertIn("disabled GPU mode must not request GPUs", MODULE.static_validate(root))
 
     def test_dotnet_is_detected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -159,6 +251,15 @@ class PlannerTests(unittest.TestCase):
             verifier = next(item for item in plan["operations"] if item["path"] == "scripts/dev/verify_env.sh")
             self.assertIn("require_command dotnet", verifier["content"])
             self.assertIn("Expected the .NET/mono Godot build", verifier["content"])
+
+    def test_project_discovery_skips_virtual_environments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "game").mkdir()
+            (root / "game" / "project.godot").write_text("[application]\n", encoding="utf-8")
+            (root / ".venv").mkdir()
+            (root / ".venv" / "project.godot").write_text("ignore\n", encoding="utf-8")
+            self.assertEqual(["game"], MODULE.detect_projects(root))
 
     def test_safe_merges_preserve_existing_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -182,6 +283,101 @@ class PlannerTests(unittest.TestCase):
             self.assertIn("custom.tmp", (root / ".gitignore").read_text(encoding="utf-8"))
             self.assertEqual([], json.loads((root / ".devcontainer" / "devcontainer.json").read_text())["forwardPorts"])
             self.assertEqual([], MODULE.static_validate(root))
+
+    def test_host_worktree_mode_omits_volume_and_lock_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock, "--worktree-mode", "host")
+            operations = {item["path"]: item for item in plan["operations"]}
+            config = json.loads(operations[".devcontainer/devcontainer.json"]["content"])
+            self.assertNotIn("-worktrees", "\n".join(config["mounts"]))
+            self.assertNotIn("scripts/dev/manage_worktree.sh", operations)
+            lock_data = json.loads(operations[".devcontainer/toolchain.lock.json"]["content"])
+            self.assertEqual("host", lock_data["volumes"]["worktrees"])
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            MODULE.apply_plan(plan_path)
+            self.assertEqual([], MODULE.static_validate(root))
+
+    def test_instruction_precedence_and_managed_block_preserve_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "AGENTS.md").write_text("# Base\nKeep base.\n", encoding="utf-8")
+            (root / "AGENTS.override.md").write_text("# Override\nKeep override.\n", encoding="utf-8")
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock)
+            operations = {item["path"]: item for item in plan["operations"]}
+            self.assertEqual("merge", operations["AGENTS.override.md"]["action"])
+            self.assertIn("Keep override.", operations["AGENTS.override.md"]["content"])
+            self.assertIn(".devcontainer/storage-policy.md", operations["AGENTS.override.md"]["content"])
+            self.assertNotIn("AGENTS.md", operations)
+
+    def test_configured_instruction_fallback_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".codex").mkdir()
+            (root / ".codex" / "config.toml").write_text(
+                'project_doc_fallback_filenames = ["PROJECT.md"]\n', encoding="utf-8"
+            )
+            (root / "PROJECT.md").write_text("# Project rules\n", encoding="utf-8")
+            lock = fake_lock(root / "resolved.json")
+            operations = {item["path"]: item for item in plan_for(root, lock)["operations"]}
+            self.assertIn("PROJECT.md", operations)
+            self.assertNotIn("AGENTS.md", operations)
+
+    def test_static_validation_rejects_storage_mismatches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock, "--gpu-mode", "nvidia")
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            MODULE.apply_plan(plan_path)
+            config_path = root / ".devcontainer" / "devcontainer.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["mounts"] = [item for item in config["mounts"] if "inference-cache" not in item]
+            config["containerEnv"]["HF_HOME"] = "/home/vscode/.cache/inference"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            errors = MODULE.static_validate(root)
+            self.assertIn("NVIDIA mode must mount the inference cache volume", errors)
+            self.assertIn("NVIDIA mode must not override HF_HOME", errors)
+
+    @unittest.skipUnless(BASH and shutil.which("git"), "Git Bash and git are required")
+    def test_worktree_helper_locks_and_safely_removes_real_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            (root / "project.godot").write_text("[application]\n", encoding="utf-8")
+            subprocess.run(["git", "add", "project.godot"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock)
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            MODULE.apply_plan(plan_path)
+            helper = [BASH, "scripts/dev/manage_worktree.sh"]
+            helper_env = os.environ.copy()
+            helper_env["PATH"] = (
+                r"C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin;"
+                + helper_env.get("PATH", "")
+            )
+            subprocess.run([*helper, "create", "task-one", "task/one"], cwd=root, check=True, env=helper_env)
+            porcelain = subprocess.check_output(["git", "worktree", "list", "--porcelain"], cwd=root, text=True)
+            self.assertIn("locked managed by setup-godot-devcontainer", porcelain)
+            subprocess.run([*helper, "verify"], cwd=root, check=True, env=helper_env)
+            task = root / ".worktree" / "task-one"
+            (task / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            refused = subprocess.run([*helper, "remove", "task-one"], cwd=root, capture_output=True, env=helper_env)
+            self.assertNotEqual(0, refused.returncode)
+            self.assertTrue(task.is_dir())
+            (task / "dirty.txt").unlink()
+            subprocess.run([*helper, "remove", "task-one"], cwd=root, check=True, env=helper_env)
+            self.assertFalse(task.exists())
+            branches = subprocess.check_output(["git", "branch", "--list", "task/one"], cwd=root, text=True)
+            self.assertIn("task/one", branches)
 
     def test_existing_complex_file_blocks_all_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -258,6 +454,64 @@ class PlannerTests(unittest.TestCase):
             self.assertIn("fixed SSH host port", findings)
             self.assertIn("not explicitly loopback-only", findings)
 
+    def test_inspect_classifies_nvidia_inference_and_inconsistent_gpu_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".devcontainer").mkdir()
+            config_path = root / ".devcontainer" / "devcontainer.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "runArgs": ["--gpus=all"],
+                        "hostRequirements": {"gpu": True},
+                        "containerEnv": {
+                            "NVIDIA_VISIBLE_DEVICES": "all",
+                            "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+                            "LIBGL_ALWAYS_SOFTWARE": "1",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_target(root)
+            self.assertEqual("nvidia-inference", inspection["gpu_signals"]["mode"])
+            self.assertIs(True, inspection["gpu_signals"]["host_required"])
+            self.assertIs(True, inspection["gpu_signals"]["software_rendering"])
+            self.assertNotIn("inconsistent", "\n".join(inspection["findings"]).lower())
+
+            config_path.write_text(
+                json.dumps({"containerEnv": {"NVIDIA_VISIBLE_DEVICES": "all"}}),
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_target(root)
+            self.assertEqual("inconsistent", inspection["gpu_signals"]["mode"])
+            self.assertIn("inconsistent", "\n".join(inspection["findings"]).lower())
+
+    def test_inspect_classifies_storage_and_reports_missing_policy_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".devcontainer").mkdir()
+            (root / ".devcontainer" / "devcontainer.json").write_text(
+                json.dumps(
+                    {
+                        "mounts": [
+                            "source=x-worktrees,target=/workspaces/${localWorkspaceFolderBasename}/.worktree,type=volume",
+                            "source=x-cache,target=/home/vscode/.cache,type=volume",
+                            "source=x-inference,target=/home/vscode/.cache/inference,type=volume",
+                        ],
+                        "containerEnv": {"INFERENCE_CACHE_DIR": "/home/vscode/.cache/inference"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_target(root)
+            self.assertEqual("volume", inspection["storage_signals"]["worktrees"])
+            self.assertEqual("volume", inspection["storage_signals"]["inference_cache"])
+            findings = "\n".join(inspection["findings"])
+            self.assertIn("broad /home/vscode/.cache", findings)
+            self.assertIn("without the managed lock helper", findings)
+            self.assertIn("does not link to the storage policy", findings)
+
     def test_fixed_ssh_is_loopback_only_and_optional_tools_are_not_required(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -265,6 +519,8 @@ class PlannerTests(unittest.TestCase):
             plan = plan_for(
                 root,
                 lock,
+                "--gpu-mode",
+                "nvidia",
                 "--ssh-mode",
                 "fixed",
                 "--ssh-port",
@@ -276,7 +532,9 @@ class PlannerTests(unittest.TestCase):
             )
             operations = {item["path"]: item for item in plan["operations"]}
             config = json.loads(operations[".devcontainer/devcontainer.json"]["content"])
-            self.assertEqual(["-p", "127.0.0.1:2224:22"], config["runArgs"])
+            self.assertEqual(
+                ["--gpus=all", "-p", "127.0.0.1:2224:22"], config["runArgs"]
+            )
             verify = operations["scripts/dev/verify_env.sh"]["content"]
             self.assertIn('if [[ "false" == true ]]; then require_command gh; fi', verify)
             self.assertIn('if [[ "false" == true ]]; then\n  require_command code-cli', verify)
