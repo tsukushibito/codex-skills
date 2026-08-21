@@ -1,0 +1,7 @@
+{
+  "name": "godot-devcontainer-playwright-mcp",
+  "private": true,
+  "devDependencies": {
+    "@playwright/mcp": "0.0.79"
+  }
+}

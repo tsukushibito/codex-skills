@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+display="${PLAYWRIGHT_DISPLAY:-${DISPLAY:-:99}}"
+profile_dir="/home/vscode/.local/share/playwright-chatgpt-profile/google-chrome"
+command -v google-chrome-stable >/dev/null 2>&1 || { echo "Google Chrome stable is not installed." >&2; exit 1; }
+DISPLAY="$display" xdpyinfo >/dev/null 2>&1 || { echo "Virtual display $display is not ready." >&2; exit 1; }
+install -d -m 0700 "$profile_dir"
+if find "$profile_dir" -maxdepth 1 \( -name SingletonLock -o -name SingletonSocket -o -name SingletonCookie \) \
+  -print -quit | grep -q .; then
+  echo "The ChatGPT Chrome profile is already locked: $profile_dir" >&2
+  echo "Close the existing browser; no process was terminated." >&2
+  exit 1
+fi
+printf 'Manual ChatGPT login browser: http://127.0.0.1:{{NOVNC_HOST_PORT}}/vnc.html\n'
+printf 'Close Chrome after login so Playwright MCP can use the profile.\n'
+exec env DISPLAY="$display" google-chrome-stable --user-data-dir="$profile_dir" \
+  --no-first-run --no-default-browser-check --password-store=basic --window-size=1440,900 https://chatgpt.com/

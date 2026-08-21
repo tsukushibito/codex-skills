@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+architecture="$(dpkg --print-architecture)"
+case "$architecture" in amd64|arm64) ;; *) echo "Unsupported Google Chrome architecture: $architecture" >&2; exit 1 ;; esac
+
+for executable_link in /proc/[0-9]*/exe; do
+  executable="$(readlink -f "$executable_link" 2>/dev/null || true)"
+  if [[ "$executable" == /opt/google/chrome/chrome ]]; then
+    echo "Google Chrome is running; close it before installing or updating Chrome." >&2
+    exit 1
+  fi
+done
+
+temporary_dir="$(mktemp -d)"
+trap 'rm -rf -- "$temporary_dir"' EXIT
+keyring_path="/usr/share/keyrings/google-chrome.gpg"
+source_path="/etc/apt/sources.list.d/google-chrome.sources"
+curl -fsSL --retry 3 --output "$temporary_dir/google-linux-signing-key.pub" \
+  https://dl.google.com/linux/linux_signing_key.pub
+gpg --batch --yes --dearmor --output "$temporary_dir/google-chrome.gpg" \
+  "$temporary_dir/google-linux-signing-key.pub"
+sudo install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d
+sudo install -m 0644 "$temporary_dir/google-chrome.gpg" "$keyring_path"
+printf '%s\n' \
+  'Types: deb' \
+  'URIs: https://dl.google.com/linux/chrome/deb/' \
+  'Suites: stable' \
+  'Components: main' \
+  "Architectures: $architecture" \
+  "Signed-By: $keyring_path" >"$temporary_dir/google-chrome.sources"
+sudo install -m 0644 "$temporary_dir/google-chrome.sources" "$source_path"
+sudo apt-get update
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends google-chrome-stable
+printf 'Google Chrome: %s\n' "$(google-chrome-stable --version)"

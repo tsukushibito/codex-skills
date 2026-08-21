@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+playwright="$workspace_root/.devcontainer/playwright-e2e/node_modules/.bin/playwright"
+[[ -x "$playwright" ]] || { echo "Run .devcontainer/post-create.sh first." >&2; exit 1; }
+if [[ "${1:-}" == ui ]]; then
+  shift
+  exec "$playwright" test --ui --ui-host 0.0.0.0 --ui-port 9323 "$@"
+fi
+exec "$playwright" test "$@"

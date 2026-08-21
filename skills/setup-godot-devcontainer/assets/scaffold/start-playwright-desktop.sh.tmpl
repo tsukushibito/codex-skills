@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+display="${PLAYWRIGHT_DISPLAY:-:99}"
+geometry="${PLAYWRIGHT_DESKTOP_GEOMETRY:-1440x900}"
+state_dir="/tmp/playwright-desktop-$(id -u)"
+desktop_password="${DEVCONTAINER_DESKTOP_PASSWORD:-}"
+if [[ -z "$desktop_password" ]]; then
+  echo "DEVCONTAINER_DESKTOP_PASSWORD is required to start the Playwright desktop." >&2
+  exit 1
+fi
+
+install -d -m 0700 "$state_dir"
+sudo install -d -m 1777 -o root -g root /tmp/.X11-unix
+process_is_running() {
+  local pid_file="$1" expected="$2" pid
+  [[ -f "$pid_file" ]] || return 1
+  pid="$(<"$pid_file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null &&
+    [[ "$(ps -p "$pid" -o args= 2>/dev/null)" == *"$expected"* ]]
+}
+
+password_file="$state_dir/x11vnc.passwd"
+umask 077
+x11vnc -storepasswd "$desktop_password" "$password_file" >/dev/null 2>&1
+unset desktop_password
+if process_is_running "$state_dir/x11vnc.pid" x11vnc &&
+  ! process_is_running "$state_dir/x11vnc.pid" "-rfbauth $password_file"; then
+  kill "$(<"$state_dir/x11vnc.pid")" 2>/dev/null || true
+fi
+if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
+  nohup setsid Xvfb "$display" -screen 0 "${geometry}x24" -ac -nolisten tcp >"$state_dir/xvfb.log" 2>&1 &
+  echo "$!" >"$state_dir/xvfb.pid"
+  for _ in {1..50}; do DISPLAY="$display" xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
+fi
+DISPLAY="$display" xdpyinfo >/dev/null 2>&1 || { echo "Virtual display failed; see $state_dir/xvfb.log" >&2; exit 1; }
+if ! process_is_running "$state_dir/openbox.pid" openbox; then
+  nohup setsid env DISPLAY="$display" openbox >"$state_dir/openbox.log" 2>&1 & echo "$!" >"$state_dir/openbox.pid"
+fi
+if ! process_is_running "$state_dir/x11vnc.pid" "-rfbauth $password_file"; then
+  nohup setsid x11vnc -display "$display" -forever -shared -rfbauth "$password_file" \
+    -listen 127.0.0.1 -rfbport 5900 >"$state_dir/x11vnc.log" 2>&1 & echo "$!" >"$state_dir/x11vnc.pid"
+fi
+if ! process_is_running "$state_dir/novnc.pid" websockify; then
+  nohup setsid websockify --web=/usr/share/novnc 0.0.0.0:6080 127.0.0.1:5900 \
+    >"$state_dir/novnc.log" 2>&1 & echo "$!" >"$state_dir/novnc.pid"
+fi
+printf 'Playwright desktop: http://127.0.0.1:{{NOVNC_HOST_PORT}}/vnc.html\n'

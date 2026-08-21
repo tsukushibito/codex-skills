@@ -1,6 +1,6 @@
 ---
 name: setup-godot-devcontainer
-description: Inspect, plan, create, merge, and validate a reproducible Dev Container for Godot 4.x GDScript or .NET projects. Use when Codex needs to add, migrate, repair, or audit `.devcontainer/`, Godot headless checks, container Codex policy, optional NVIDIA inference GPU access, optional SSH, or a VS Code CLI exposed as `code-cli`, while preserving an existing repository and showing conflicts instead of overwriting files.
+description: Inspect, plan, create, merge, and validate a reproducible Dev Container for Godot 4.x GDScript or .NET projects. Use when Codex needs to add, migrate, repair, or audit `.devcontainer/`, Godot headless checks, container Codex policy, optional NVIDIA inference GPU access, SSH, VS Code CLI, or an isolated ChatGPT browser and Playwright bundle, while preserving an existing repository and showing conflicts instead of overwriting files.
 ---
 
 # Setup Godot DevContainer
@@ -17,7 +17,8 @@ version resolution, diffs, conflict handling, and validation follow one contract
 - Treat repository instructions and existing user content as authoritative.
 - Keep the reusable scope limited to Godot, GDScript/.NET tooling, container-local
   Codex, generic asset tools, optional NVIDIA inference GPU access, SSH, editor
-  integration, and generic validation.
+  integration, an optional Chrome/noVNC/Playwright ChatGPT browser bundle, and
+  generic validation.
   Do not introduce Beads, repository-specific review policy, game tests, telemetry,
   or production gates unless separately requested.
 - Generate `.codex/config.toml` for every scaffold. This Dev Container profile is
@@ -34,6 +35,11 @@ version resolution, diffs, conflict handling, and validation follow one contract
   separate inference cache at `/home/vscode/.cache/inference`; never claim or mount
   all of `/home/vscode/.cache`.
 - Do not expose SSH through a fixed host port unless the user selects that mode.
+- Keep the ChatGPT browser bundle disabled unless selected. Prefer VS Code port
+  forwarding; fixed browser ports must bind to loopback only.
+- Keep ChatGPT login, MFA, CAPTCHA, consent, and terms acceptance manual through
+  noVNC. Never weaken Chrome's sandbox or share its persistent profile across
+  concurrent sessions.
 - Do not claim support for an architecture unless the selected Godot release has
   a checksum-bearing artifact for it.
 - Before planning any creation or modification, show every applicable configurable
@@ -71,6 +77,10 @@ individual entries. Prior user choices may prefill the checklist, but every entr
 must still appear in the consolidated confirmation. Do not run `plan` until the
 user explicitly accepts all entries. Read-only `inspect` and `validate` requests
 that do not create or modify files are exempt from this checkpoint.
+
+When the ChatGPT browser is proposed, also read
+[chatgpt-browser.md](references/chatgpt-browser.md) before presenting its access,
+credential, persistence, and Chrome update consequences.
 
 ### 3. Create a read-only plan
 
@@ -151,6 +161,7 @@ Report:
 - created, safely merged, manually merged, and unchanged files;
 - selected flavor, architectures, tool profile, GPU mode, SSH mode, and exact
   resolved versions, plus worktree/storage mode;
+- ChatGPT browser state, access mode, and fixed host ports when applicable;
 - static, container, headless import, and main-scene smoke results;
 - skipped checks and the exact reason;
 - remaining non-hermetic inputs, especially Debian package repository snapshots;

@@ -18,6 +18,9 @@ before `plan`; a single approval of the complete displayed checklist is sufficie
 | Architectures | Any supported subset of `amd64,arm64` | Confirm the complete list, not only deviations from the default. |
 | Inference GPU | `off` or `nvidia` | Explain that NVIDIA mode requires a compatible host runtime and does not install CUDA frameworks. |
 | Worktree storage | `volume` or `host` | State whether task worktrees are container-native or host-visible. |
+| ChatGPT browser | `off` or enabled | Enabled adds Chrome stable, Xvfb/Openbox/noVNC, isolated E2E and MCP Playwright installs, a persistent ChatGPT profile, Codex MCP config, and read-only policy. |
+| Browser access | `vscode` or `fixed` | Applicable only when enabled. Prefer VS Code forwarding; fixed mode uses loopback-only host mappings. |
+| Browser host ports | noVNC and Playwright UI ports | Applicable only to `fixed`; propose available, distinct ports that do not conflict with fixed SSH. Defaults are 6080 and 9323. |
 | SSH mode | `vscode`, `fixed`, or `off` | Explain dynamic VS Code forwarding versus a stable loopback-only host mapping. |
 | Fixed SSH port | Port number | Applicable only to `fixed`; inspect likely host-port conflicts and propose an available value. |
 | Optional tools | Enable or disable each of `github-cli`, `git-lfs`, `image-tools`, `ssh`, and `vscode-cli` | List every tool separately. SSH tool state must agree with SSH mode. |
@@ -39,6 +42,9 @@ do not create or modify files do not require these checkpoints.
 | SSH | VS Code forwarding | `--ssh-mode vscode|fixed|off` | `vscode` forwards container port 22 without a fixed host binding. |
 | Fixed SSH port | None | `--ssh-mode fixed --ssh-port PORT` | Adds a loopback-only Docker host mapping. |
 | Optional tool | Enabled | `--disable-tool NAME` | Names: `github-cli`, `git-lfs`, `image-tools`, `ssh`, `vscode-cli`. Repeat as needed. |
+| ChatGPT browser bundle | Off | `--chatgpt-browser` | Adds the browser, Playwright, profile, Codex MCP, and validation bundle as one selection. |
+| Browser access | VS Code forwarding | `--browser-access-mode vscode\|fixed` | `vscode` forwards container ports 6080 and 9323; `fixed` publishes them loopback-only. |
+| Fixed browser ports | 6080 and 9323 | `--novnc-host-port PORT --playwright-ui-host-port PORT` | Valid only with the bundle and fixed access mode. |
 
 Version options are `--godot-version`, `--node-version`, `--codex-version`,
 `--uv-version`, `--gdtoolkit-version`, and `--vscode-version`. Supplying one means
@@ -54,6 +60,12 @@ the container.
 `--resolved-toolchain PATH` reuses a compatible lock-shaped JSON file. Use it for
 offline/repeat generation only after reviewing its provenance and architecture
 coverage.
+
+The browser bundle is intentionally one switch because its browser, desktop,
+profile, MCP, Codex policy, and validation pieces are security-dependent. E2E
+Playwright and Playwright MCP remain two exact, repository-local npm locks under
+`.devcontainer`; neither changes the target project's package manifest. Read
+[chatgpt-browser.md](chatgpt-browser.md) before enabling it.
 
 NVIDIA mode adds Docker `--gpus=all`, declares `hostRequirements.gpu: true`, and
 sets `NVIDIA_VISIBLE_DEVICES=all` plus

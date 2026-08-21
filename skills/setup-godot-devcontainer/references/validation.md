@@ -5,7 +5,8 @@ Validation is intentionally layered.
 1. `validate --mode static` checks required paths, JSON/JSONC, lock schema,
    architecture declarations, Godot SHA-256 values, required Codex trust settings,
    storage lock consistency, exact purpose-specific mounts, inference environment,
-   the active instruction link, and shell syntax when Bash is present and executable.
+   optional browser ports/mounts/environment/seccomp/MCP/locks, the active
+   instruction link, and shell syntax when Bash is present and executable.
 2. `validate --mode auto` performs static checks, then uses the Dev Container CLI
    when available. Without that CLI it succeeds as a partial validation and prints
    the VS Code workflow.
@@ -32,6 +33,14 @@ Static validation rejects a broad `/home/vscode/.cache` mount, missing or extra
 worktree/inference mounts, cache variables that disagree with the lock, `HF_HOME`
 override, a missing storage policy, or a missing link in the active root Codex
 instruction file.
+
+With the ChatGPT browser enabled, environment validation checks Google Chrome
+stable without `--no-sandbox`, launches the Chrome channel through Playwright,
+checks the exact E2E and MCP package pins, and verifies the stable MCP launcher.
+It does not log in to ChatGPT or inspect profile contents. `postStart` requires
+`DEVCONTAINER_DESKTOP_PASSWORD`; a missing password fails the noVNC desktop rather
+than starting an unauthenticated listener. See
+[chatgpt-browser.md](chatgpt-browser.md) for manual login and lock handling.
 
 NVIDIA mode is required, not best-effort. A failure while Docker creates the
 container usually means the host lacks a compatible NVIDIA driver or Docker GPU

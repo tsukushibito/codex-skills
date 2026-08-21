@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+bash "$workspace_root/.devcontainer/start-sshd.sh"
+bash "$workspace_root/.devcontainer/start-playwright-desktop.sh"

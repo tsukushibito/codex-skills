@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+profile_dir="/home/vscode/.local/share/playwright-chatgpt-profile/google-chrome"
+if find "$profile_dir" -maxdepth 1 \( -name SingletonLock -o -name SingletonSocket -o -name SingletonCookie \) \
+  -print -quit 2>/dev/null | grep -q .; then
+  echo "The ChatGPT Chrome profile is already locked; no process was terminated." >&2
+  exit 1
+fi
+exec node "$workspace_root/.devcontainer/playwright-mcp/node_modules/@playwright/mcp/cli.js" \
+  --config "$workspace_root/.devcontainer/playwright-mcp.chatgpt.json"

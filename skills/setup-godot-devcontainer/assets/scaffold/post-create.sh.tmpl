@@ -3,6 +3,9 @@ set -euo pipefail
 
 workspace_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 persistent_paths=(/home/vscode/.local /home/vscode/.cache/godot /home/vscode/.cache/uv /home/vscode/.codex)
+if [[ "{{INSTALL_CHATGPT_BROWSER}}" == true ]]; then
+  persistent_paths+=(/home/vscode/.cache/ms-playwright /home/vscode/.local/share/playwright-chatgpt-profile)
+fi
 if [[ "{{GPU_MODE}}" == nvidia ]]; then persistent_paths+=(/home/vscode/.cache/inference); fi
 if [[ "{{WORKTREE_MODE}}" == volume ]]; then persistent_paths+=("$workspace_root/.worktree"); fi
 if [[ "{{INSTALL_GITHUB_CLI}}" == true ]]; then persistent_paths+=(/home/vscode/.config/gh); fi
@@ -11,6 +14,11 @@ if [[ "{{INSTALL_SSH}}" == true ]]; then persistent_paths+=(/home/vscode/.ssh); 
 sudo mkdir -p "${persistent_paths[@]}"
 sudo chown -R vscode:vscode "${persistent_paths[@]}"
 mkdir -p /home/vscode/.local/bin
+
+if [[ "{{INSTALL_CHATGPT_BROWSER}}" == true ]]; then
+  chmod 0700 /home/vscode/.local/share/playwright-chatgpt-profile
+  bash "$workspace_root/.devcontainer/install-google-chrome.sh"
+fi
 
 if git -C "$workspace_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git config --global --add safe.directory "$workspace_root"
@@ -24,7 +32,18 @@ elif [[ "{{INSTALL_GIT_LFS}}" == true ]]; then
   git lfs version >/dev/null
 fi
 
-npm install --global "@openai/codex@{{CODEX_VERSION}}" --prefix /home/vscode/.local
+npm install --global "@openai/codex@{{CODEX_VERSION}}"
+if [[ "{{INSTALL_CHATGPT_BROWSER}}" == true ]]; then
+  npm ci --prefix "$workspace_root/.devcontainer/playwright-e2e"
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$workspace_root/.devcontainer/playwright-mcp"
+  playwright_cli="$workspace_root/.devcontainer/playwright-e2e/node_modules/.bin/playwright"
+  sudo env "PATH=$PATH" PLAYWRIGHT_BROWSERS_PATH=/home/vscode/.cache/ms-playwright \
+    "$playwright_cli" install-deps chromium
+  PLAYWRIGHT_BROWSERS_PATH=/home/vscode/.cache/ms-playwright "$playwright_cli" install chromium
+  chmod 0755 "$workspace_root/scripts/dev/start-playwright-chatgpt-mcp.sh"
+  ln -sfn "$workspace_root/scripts/dev/start-playwright-chatgpt-mcp.sh" \
+    /home/vscode/.local/bin/playwright-chatgpt-mcp
+fi
 uv tool install --force --link-mode copy "gdtoolkit=={{GDTOOLKIT_VERSION}}"
 
 if [[ "{{INSTALL_SSH}}" == true ]]; then

@@ -15,6 +15,9 @@ The planner resolves mutable channels before it proposes repository changes:
 - VS Code resolves a common product version and the exact architecture-specific
   `code` Debian packages from Microsoft's repository metadata. Docker downloads
   those package URLs directly and verifies their published SHA-256 values.
+- When selected, `@playwright/test` and `@playwright/mcp` are exact independent
+  npm locks. Google Chrome comes from Google's signed stable APT channel during
+  `postCreate` and intentionally remains a security-updated, non-pinned input.
 
 The generated `.devcontainer/toolchain.lock.json` is the reviewable record. A later
 container rebuild uses those exact primary versions. Values resolved because the

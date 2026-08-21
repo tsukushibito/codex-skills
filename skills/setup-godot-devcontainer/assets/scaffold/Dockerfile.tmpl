@@ -17,6 +17,7 @@ ARG INSTALL_GIT_LFS
 ARG INSTALL_IMAGE_TOOLS
 ARG INSTALL_SSH
 ARG INSTALL_VSCODE_CLI
+ARG INSTALL_CHATGPT_BROWSER
 ARG VSCODE_AMD64_URL
 ARG VSCODE_AMD64_SHA256
 ARG VSCODE_ARM64_URL
@@ -35,6 +36,9 @@ RUN set -eux; \
     if [ "$INSTALL_GITHUB_CLI" = true ]; then apt-get install -y --no-install-recommends gh; fi; \
     if [ "$INSTALL_GIT_LFS" = true ]; then apt-get install -y --no-install-recommends git-lfs; fi; \
     if [ "$INSTALL_IMAGE_TOOLS" = true ]; then apt-get install -y --no-install-recommends imagemagick optipng pngquant; fi; \
+    if [ "$INSTALL_CHATGPT_BROWSER" = true ]; then \
+        apt-get install -y --no-install-recommends novnc openbox websockify x11-utils x11vnc; \
+    fi; \
     if [ "$INSTALL_SSH" = true ]; then \
         apt-get install -y --no-install-recommends openssh-server; \
         mkdir -p /run/sshd; \

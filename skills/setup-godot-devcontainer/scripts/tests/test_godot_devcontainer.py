@@ -156,9 +156,18 @@ class PlannerTests(unittest.TestCase):
             lock_data = json.loads(operations[".devcontainer/toolchain.lock.json"]["content"])
             self.assertEqual({"mode": "off"}, lock_data["gpu"])
             self.assertEqual(
-                {"worktrees": "volume", "godot_cache": "volume", "inference_cache": "off"},
+                {
+                    "worktrees": "volume",
+                    "godot_cache": "volume",
+                    "inference_cache": "off",
+                    "playwright_cache": "off",
+                    "playwright_chatgpt_profile": "off",
+                },
                 lock_data["volumes"],
             )
+            self.assertFalse(lock_data["chatgpt_browser"]["enabled"])
+            self.assertNotIn(".devcontainer/chrome-seccomp.json", operations)
+            self.assertNotIn("playwright_chatgpt", operations[".codex/config.toml"]["content"])
             self.assertIn("scripts/dev/manage_worktree.sh", operations)
             self.assertIn(".devcontainer/storage-policy.md", operations)
             self.assertIn("AGENTS.md", operations)
@@ -572,6 +581,155 @@ class PlannerTests(unittest.TestCase):
             installer = operations[".devcontainer/install-godot.sh"]["content"]
             self.assertIn("amd64)", installer)
             self.assertNotIn("arm64)", installer)
+
+    def test_chatgpt_browser_vscode_bundle_is_generated_and_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock, "--chatgpt-browser")
+            self.assertTrue(plan["selection"]["chatgpt_browser"])
+            self.assertEqual("vscode", plan["selection"]["browser_access_mode"])
+            operations = {item["path"]: item for item in plan["operations"]}
+            config = json.loads(operations[".devcontainer/devcontainer.json"]["content"])
+            self.assertEqual([22, 6080, 9323], config["forwardPorts"])
+            self.assertIn("--shm-size=1g", config["runArgs"])
+            self.assertIn(
+                "seccomp=${localWorkspaceFolder}/.devcontainer/chrome-seccomp.json",
+                config["runArgs"],
+            )
+            self.assertEqual(":99", config["containerEnv"]["DISPLAY"])
+            self.assertIn(".devcontainer/chrome-seccomp.json", operations)
+            self.assertIn(".devcontainer/playwright-e2e/package-lock.json", operations)
+            self.assertIn(".devcontainer/playwright-mcp/package-lock.json", operations)
+            codex = operations[".codex/config.toml"]["content"]
+            self.assertIn('command = "playwright-chatgpt-mcp"', codex)
+            self.assertNotIn("/workspaces/", codex)
+            post_create = operations[".devcontainer/post-create.sh"]["content"]
+            self.assertIn('npm install --global "@openai/codex@0.99.0"', post_create)
+            self.assertNotIn("--prefix /home/vscode/.local", post_create)
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            MODULE.apply_plan(plan_path)
+            self.assertEqual([], MODULE.static_validate(root))
+            inspection = MODULE.inspect_target(root)
+            self.assertTrue(inspection["browser_signals"]["enabled"])
+            self.assertEqual("vscode", inspection["browser_signals"]["access_mode"])
+            self.assertTrue(inspection["browser_signals"]["mcp_configured"])
+
+    def test_chatgpt_browser_fixed_ports_are_loopback_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(
+                root,
+                lock,
+                "--chatgpt-browser",
+                "--browser-access-mode",
+                "fixed",
+                "--novnc-host-port",
+                "16080",
+                "--playwright-ui-host-port",
+                "19323",
+            )
+            config = json.loads(
+                next(
+                    item["content"]
+                    for item in plan["operations"]
+                    if item["path"] == ".devcontainer/devcontainer.json"
+                )
+            )
+            self.assertNotIn(6080, config["forwardPorts"])
+            self.assertIn("127.0.0.1:16080:6080", config["runArgs"])
+            self.assertIn("127.0.0.1:19323:9323", config["runArgs"])
+            defaults = plan_for(
+                root,
+                lock,
+                "--chatgpt-browser",
+                "--browser-access-mode",
+                "fixed",
+            )["selection"]
+            self.assertEqual(6080, defaults["novnc_host_port"])
+            self.assertEqual(9323, defaults["playwright_ui_host_port"])
+
+    def test_browser_only_options_and_port_conflicts_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            invalid = [
+                ("--browser-access-mode", "fixed"),
+                ("--chatgpt-browser", "--novnc-host-port", "6080"),
+                (
+                    "--chatgpt-browser",
+                    "--browser-access-mode",
+                    "fixed",
+                    "--novnc-host-port",
+                    "0",
+                ),
+                (
+                    "--chatgpt-browser",
+                    "--browser-access-mode",
+                    "fixed",
+                    "--novnc-host-port",
+                    "70000",
+                ),
+                (
+                    "--chatgpt-browser",
+                    "--browser-access-mode",
+                    "fixed",
+                    "--novnc-host-port",
+                    "6080",
+                    "--playwright-ui-host-port",
+                    "6080",
+                ),
+                (
+                    "--chatgpt-browser",
+                    "--browser-access-mode",
+                    "fixed",
+                    "--ssh-mode",
+                    "fixed",
+                    "--ssh-port",
+                    "6080",
+                ),
+            ]
+            for arguments in invalid:
+                with self.subTest(arguments=arguments), self.assertRaises(MODULE.SetupError):
+                    plan_for(root, lock, *arguments)
+
+    def test_browser_codex_block_is_owned_and_unmanaged_server_conflicts(self) -> None:
+        source = '# keep\nmodel = "gpt-5"\n'
+        enabled = MODULE.merge_codex_config(source, True)
+        self.assertIn(MODULE.BROWSER_CODEX_START, enabled)
+        self.assertEqual(enabled, MODULE.merge_codex_config(enabled, True))
+        disabled = MODULE.merge_codex_config(enabled, False)
+        self.assertNotIn("playwright_chatgpt", disabled)
+        self.assertIn('model = "gpt-5"', disabled)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".codex").mkdir()
+            (root / ".codex/config.toml").write_text(
+                '[mcp_servers.playwright_chatgpt]\ncommand = "custom"\n', encoding="utf-8"
+            )
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock, "--chatgpt-browser")
+            operation = next(
+                item for item in plan["operations"] if item["path"] == ".codex/config.toml"
+            )
+            self.assertEqual("conflict", operation["action"])
+
+    def test_static_validation_catches_browser_security_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = fake_lock(root / "resolved.json")
+            plan = plan_for(root, lock, "--chatgpt-browser")
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            MODULE.apply_plan(plan_path)
+            config_path = root / ".devcontainer/devcontainer.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["runArgs"].remove("--shm-size=1g")
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            self.assertIn("ChatGPT browser must set --shm-size=1g", MODULE.static_validate(root))
 
 
 if __name__ == "__main__":

@@ -53,8 +53,50 @@ if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then
       code-cli --version
   )"
 fi
+if [[ "{{INSTALL_CHATGPT_BROWSER}}" == true ]]; then
+  require_command google-chrome-stable
+  require_command xdpyinfo
+  require_command Xvfb
+  require_command openbox
+  require_command x11vnc
+  require_command websockify
+  e2e_playwright="$workspace_root/.devcontainer/playwright-e2e/node_modules/.bin/playwright"
+  playwright_mcp="$workspace_root/.devcontainer/playwright-mcp/node_modules/.bin/playwright-mcp"
+  for local_tool in "$e2e_playwright" "$playwright_mcp" /home/vscode/.local/bin/playwright-chatgpt-mcp; do
+    [[ -x "$local_tool" ]] || { echo "Required browser tool is missing: $local_tool" >&2; exit 1; }
+  done
+  codex_mcp_list="$(cd "$workspace_root" && codex mcp list)"
+  grep -q 'playwright_chatgpt' <<<"$codex_mcp_list" || {
+    echo "Codex does not list the playwright_chatgpt MCP server." >&2
+    exit 1
+  }
+  chrome_profile_dir="$(mktemp -d)"
+  chrome_smoke_log="$(mktemp)"
+  cleanup_chrome_smoke() { rm -rf -- "$chrome_profile_dir"; rm -f -- "$chrome_smoke_log"; }
+  trap cleanup_chrome_smoke EXIT
+  if ! google-chrome-stable --headless=new --user-data-dir="$chrome_profile_dir" \
+    --no-first-run --no-default-browser-check --password-store=basic --dump-dom about:blank \
+    >"$chrome_smoke_log" 2>&1; then
+    echo "Google Chrome failed its sandboxed smoke test:" >&2
+    cat "$chrome_smoke_log" >&2
+    exit 1
+  fi
+  node - "$workspace_root/.devcontainer/playwright-mcp" <<'JS'
+const path = require('node:path');
+const tools = process.argv[2];
+const { chromium } = require(path.join(tools, 'node_modules', 'playwright'));
+(async () => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto('data:text/html,<title>chrome-channel-smoke</title>');
+    if ((await page.title()) !== 'chrome-channel-smoke') throw new Error('unexpected title');
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exit(1); });
+JS
+fi
 
-python3 - "$lock_file" <<'PY'
+python3 - "$lock_file" "$workspace_root" <<'PY'
 import json
 import re
 import subprocess
@@ -68,6 +110,8 @@ commands = {
     "uv": ["uv", "--version"],
     "gdtoolkit": ["gdlint", "--version"],
     "vscode-cli": ["code-cli", "--version"],
+    "playwright": [f"{sys.argv[2]}/.devcontainer/playwright-e2e/node_modules/.bin/playwright", "--version"],
+    "playwright-mcp": [f"{sys.argv[2]}/.devcontainer/playwright-mcp/node_modules/.bin/playwright-mcp", "--version"],
 }
 for name, metadata in lock["tools"].items():
     if not metadata.get("explicit") or name not in commands:
@@ -106,6 +150,11 @@ printf 'Node: %s\n' "$(node --version)"
 printf 'Codex: %s\n' "$(codex --version)"
 printf 'uv: %s\n' "$(uv --version)"
 printf 'gdtoolkit: %s\n' "$(gdlint --version)"
+if [[ "{{INSTALL_CHATGPT_BROWSER}}" == true ]]; then
+  printf 'Playwright: %s\n' "$("$e2e_playwright" --version)"
+  printf 'Playwright MCP: %s\n' "$("$playwright_mcp" --version)"
+  printf 'Google Chrome: %s\n' "$(google-chrome-stable --version)"
+fi
 if [[ "{{INSTALL_VSCODE_CLI}}" == true ]]; then printf 'VS Code CLI: %s\n' "$(printf '%s\n' "$vscode_cli_version" | head -n 1)"; fi
 if [[ "{{GPU_MODE}}" == nvidia ]]; then
   gpu_info="$(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader)"
